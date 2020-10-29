@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?> 
+<launch>
+  <node pkg="tf" type="static_transform_publisher" name="stereocam_broadcaster" args="0 0 1 0 3.14159 1.5708 map stereocam 100" />
+  <node pkg="stereocam" type="stereocam_node" name="stereocam" output="screen" respawn="false" launch-prefix="">
+    <param name="frequency" value="30.0" />
+    <param name="numDisparities" value="64" />
+    <param name="blockSize" value="19" />
+    <param name="leftCamMatrix" textfile="$(find stereocam)/config/left_stereo_mtx.csv" />
+    <param name="rightCamMatrix" textfile="$(find stereocam)/config/right_stereo_mtx.csv" />
+    <param name="leftCamDist" textfile="$(find stereocam)/config/left_stereo_dist.csv" />
+    <param name="rightCamDist" textfile="$(find stereocam)/config/right_stereo_dist.csv" />
+    <param name="Rmat" textfile="$(find stereocam)/config/R.csv" />
+    <param name="Tvec" textfile="$(find stereocam)/config/T.csv" />
+    <param name="camLeftPath" value="/dev/video0" />
+    <param name="camRightPath" value="/dev/video1" />
+  </node>
+</launch>
