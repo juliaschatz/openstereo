@@ -4,7 +4,7 @@ project(stereocam)
 set(CMAKE_BUILD_TYPE Debug)
 
 ## Compile as C++11, supported in ROS Kinetic and newer
-add_definitions(-std=c++11 -Wall -Wextra -Wno-switch -mcpu=cortex-a53 -mfpu=neon-vfpv4 -D__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1 -D__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2 -D__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8)
+add_definitions(-std=c++11 -Wall -Wextra -Wno-switch -ftree-vectorize -mfpu=neon)
 
 find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
