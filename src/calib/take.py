@@ -17,18 +17,16 @@ imgct = 1
 while True:
     ret0, frameL = cam0.read()
     ret1, frameR = cam1.read()
-    grayL = cv2.cvtColor(frameL, cv2.COLOR_BGR2GRAY)
-    grayR = cv2.cvtColor(frameR, cv2.COLOR_BGR2GRAY)
     if not (ret0 and ret1):
         print("Camera failed")
         break
-    cv2.imshow("camL", grayL)
-    cv2.imshow("camR", grayR)
+    cv2.imshow("camL", frameL)
+    cv2.imshow("camR", frameR)
 
     k = cv2.waitKey(1)
     if k % 256 == 32:
-        cv2.imwrite(f"stereo2/left{imgct}.jpg", grayL)
-        cv2.imwrite(f"stereo2/right{imgct}.jpg", grayR)
+        cv2.imwrite(f"stereo2/left{imgct}.jpg", frameL)
+        cv2.imwrite(f"stereo2/right{imgct}.jpg", frameR)
         print(f"Wrote image {imgct}")
         imgct += 1
 

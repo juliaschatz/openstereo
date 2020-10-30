@@ -36,6 +36,8 @@ void update_callback(const ros::TimerEvent &);
 double frequency;
 int seq = 0;
 int numDisparities;
+int minDisparity;
+int uniquenessRatio;
 int blockSize;
 std::string camLeftPath;
 std::string camRightPath;
@@ -88,6 +90,7 @@ cv::Mat colors;
 void parseCSVMat(std::string mat, cv::Mat *out);
 void customReproject(const cv::Mat &disparity, const cv::Mat &Q, cv::Mat &colors, std::vector<uint8_t> &out);
 inline bool isValidPoint(const cv::Vec3f &pt);
+void toImageMsg(cv::Mat& image, std_msgs::Header header, const std::string& encoding, sensor_msgs::Image& ros_image);
 
 int main(int argc, char **argv)
 {
@@ -100,7 +103,9 @@ int main(int argc, char **argv)
     // Params
     pnh->param<double>("frequency", frequency, 30.0);
     pnh->param<int>("numDisparities", numDisparities, 144);
+    pnh->param<int>("minDisparity", minDisparity, 0);
     pnh->param<int>("blockSize", blockSize, 19);
+    pnh->param<int>("uniquenessRatio", uniquenessRatio, 0);
     pnh->param<std::string>("leftCamMatrix", leftCamMatrixS, "");
     pnh->param<std::string>("rightCamMatrix", rightCamMatrixS, "");
     pnh->param<std::string>("leftCamDist", leftCamDistS, "");
@@ -130,6 +135,10 @@ int main(int argc, char **argv)
     cameraLeft->set(cv::CAP_PROP_FPS, 30.0);
     cameraRight->set(cv::CAP_PROP_FPS, 30.0);
     stereo = cv::StereoBM::create(numDisparities, blockSize);
+    stereo->setMinDisparity(minDisparity);
+    //stereo->setUniquenessRatio(uniquenessRatio);
+    stereo->setPreFilterType(1);
+    stereo->setPreFilterCap(9);
 
     pcmsg.is_bigendian = false;
     pcmsg.is_dense = false;
@@ -155,8 +164,8 @@ int main(int argc, char **argv)
 
     // Publishers
     pc_pub = nh->advertise<sensor_msgs::PointCloud2>("stereocam/points", 10);
-    leftCamPub = nh->advertise<sensor_msgs::Image>("stereocam/left", 1);
-    rightCamPub = nh->advertise<sensor_msgs::Image>("stereocam/right", 1);
+    leftCamPub = nh->advertise<sensor_msgs::Image>("stereocam/left/image_raw", 1);
+    rightCamPub = nh->advertise<sensor_msgs::Image>("stereocam/right/image_raw", 1);
     disparityPub = nh->advertise<sensor_msgs::Image>("stereocam/disparity", 1);
 
     // Spin
@@ -187,6 +196,7 @@ void update_callback(const ros::TimerEvent &)
     cv::cvtColor(frameLeft, gsLeft, cv::COLOR_BGR2GRAY);
     cv::cvtColor(frameRight, gsRight, cv::COLOR_BGR2GRAY);
     auto colortime = std::chrono::high_resolution_clock::now();
+
     // remap images
     cv::remap(gsLeft, rmgsLeft, mapL1, mapL2, cv::INTER_LINEAR);
     cv::remap(gsRight, rmgsRight, mapR1, mapR2, cv::INTER_LINEAR);
@@ -200,47 +210,48 @@ void update_callback(const ros::TimerEvent &)
 
     // compute reprojection
     disparity.convertTo(disparity, CV_32F, 16.0);
-    //cv::cvtColor(colors, colors, cv::COLOR_BGR2RGBA);
-    //cv::reprojectImageTo3D(disparity, points, Q, true);
 
+    // Build the pointcloud message
     pcmsg.header = header;
     pcmsg.height = disparity.rows;
     pcmsg.width = disparity.cols;
     pcmsg.row_step = pcmsg.width * pcmsg.point_step;
     int pointslen = sizeof(float) * 4 * pcmsg.width * pcmsg.height;
     std::vector<uint8_t> pointvec;
-    pointvec.resize(pointslen, 0);
+    pcmsg.data.resize(pointslen, 0);
 
-    customReproject(disparity, Q, colors, pointvec);
-    auto reproj1time = std::chrono::high_resolution_clock::now();
-
-    pcmsg.data = pointvec;
-
-    auto reproj2time = std::chrono::high_resolution_clock::now();
-    auto colordur = std::chrono::duration_cast<std::chrono::milliseconds>(colortime - start);
-    auto remapdur = std::chrono::duration_cast<std::chrono::milliseconds>(remaptime - start);
-    auto stereodur = std::chrono::duration_cast<std::chrono::milliseconds>(stereotime - start);
-    auto reproj1dur = std::chrono::duration_cast<std::chrono::milliseconds>(reproj1time - start);
-    auto reproj2dur = std::chrono::duration_cast<std::chrono::milliseconds>(reproj2time - start);
-    std::cout << "Cumulative times:" << std::endl;
-    std::cout << "Color: " << colordur.count() << "ms" << std::endl;
-    std::cout << "Remap: " << remapdur.count() << "ms" << std::endl;
-    std::cout << "Stereo: " << stereodur.count() << "ms" << std::endl;
-    std::cout << "ReprojectImageTo3D: " << reproj1dur.count() << "ms" << std::endl;
-    std::cout << "Convert points: " << reproj2dur.count() << "ms" << std::endl
-              << std::endl;
+    // Our custom reproject message puts data directly into the pointcloud vector
+    // saving about 200ms of copying again
+    customReproject(disparity, Q, colors, pcmsg.data);
+    auto reprojtime = std::chrono::high_resolution_clock::now();
 
     // publish disparity
     cv::normalize(disparity, ndisp, 255, 0, cv::NORM_MINMAX, CV_8U);
-
-    sensor_msgs::ImagePtr msgLeft = cv_bridge::CvImage(header, "bgr8", frameLeft).toImageMsg();
-    sensor_msgs::ImagePtr msgRight = cv_bridge::CvImage(header, "bgr8", frameRight).toImageMsg();
-    sensor_msgs::ImagePtr msgDisparity = cv_bridge::CvImage(header, "mono8", ndisp).toImageMsg();
+    sensor_msgs::Image msgLeft;
+    sensor_msgs::Image msgRight;
+    sensor_msgs::Image msgDisparity;
+    toImageMsg(frameLeft, header, "bgr8", msgLeft);
+    toImageMsg(frameRight, header, "bgr8", msgRight);
+    toImageMsg(ndisp, header, "mono8", msgDisparity);
 
     leftCamPub.publish(msgLeft);
     rightCamPub.publish(msgRight);
     disparityPub.publish(msgDisparity);
     pc_pub.publish(pcmsg);
+
+    auto publishtime = std::chrono::high_resolution_clock::now();
+
+    auto colordur = std::chrono::duration_cast<std::chrono::milliseconds>(colortime - start);
+    auto remapdur = std::chrono::duration_cast<std::chrono::milliseconds>(remaptime - start);
+    auto stereodur = std::chrono::duration_cast<std::chrono::milliseconds>(stereotime - start);
+    auto reprojdur = std::chrono::duration_cast<std::chrono::milliseconds>(reprojtime - start);
+    auto publishdur = std::chrono::duration_cast<std::chrono::milliseconds>(publishtime - start);
+    std::cout << "Cumulative times:" << std::endl;
+    std::cout << "Color: " << colordur.count() << "ms" << std::endl;
+    std::cout << "Remap: " << remapdur.count() << "ms" << std::endl;
+    std::cout << "Stereo: " << stereodur.count() << "ms" << std::endl;
+    std::cout << "ReprojectImageTo3D: " << reprojdur.count() << "ms" << std::endl;
+    std::cout << "Publish: " << publishdur.count() << "ms" << std::endl << std::endl;
 }
 
 void parseCSVMat(std::string mat, cv::Mat *out)
@@ -301,4 +312,33 @@ void customReproject(const cv::Mat &disparity, const cv::Mat &Q, cv::Mat &colors
             it += 16;
         }
     }
+}
+
+void toImageMsg(cv::Mat& image, std_msgs::Header header, const std::string& encoding, sensor_msgs::Image& ros_image)
+{
+  ros_image.header = header;
+  ros_image.height = image.rows;
+  ros_image.width = image.cols;
+  ros_image.encoding = encoding;
+  ros_image.is_bigendian = false;
+  ros_image.step = image.cols * image.elemSize();
+  size_t size = ros_image.step * image.rows;
+  ros_image.data.resize(size);
+
+  if (image.isContinuous())
+  {
+    memcpy((char*)(&ros_image.data[0]), image.data, size);
+  }
+  else
+  {
+    // Copy by row by row
+    uint8_t* ros_data_ptr = (uint8_t*)(&ros_image.data[0]);
+    uint8_t* cv_data_ptr = image.data;
+    for (int i = 0; i < image.rows; ++i)
+    {
+      memcpy(ros_data_ptr, cv_data_ptr, ros_image.step);
+      ros_data_ptr += ros_image.step;
+      cv_data_ptr += image.step;
+    }
+  }
 }

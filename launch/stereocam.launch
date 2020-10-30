@@ -3,6 +3,7 @@
   <node pkg="tf" type="static_transform_publisher" name="stereocam_broadcaster" args="0 0 1 0 3.14159 1.5708 map stereocam 100" />
   <node pkg="stereocam" type="stereocam_node" name="stereocam" output="screen" respawn="false" launch-prefix="">
     <param name="frequency" value="30.0" />
+    <param name="minDisparity" value="0" />
     <param name="numDisparities" value="64" />
     <param name="blockSize" value="19" />
     <param name="leftCamMatrix" textfile="$(find stereocam)/config/left_stereo_mtx.csv" />

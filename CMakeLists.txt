@@ -1,23 +1,21 @@
 cmake_minimum_required(VERSION 3.13)
 
 project(stereocam)
-set(CMAKE_BUILD_TYPE Debug)
+set(CMAKE_BUILD_TYPE Release)
 
 ## Compile as C++11, supported in ROS Kinetic and newer
-add_definitions(-std=c++11 -Wall -Wextra -Wno-switch -ftree-vectorize -mfpu=neon)
+add_definitions(-std=c++11 -Wall -Wextra -Wno-switch -ftree-vectorize -mfpu=neon -fopt-info-vec-all)
 
 find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   roscpp
   rospy
-  cv_bridge
-  OpenCV
 )
 
 include_directories(${catkin_INCLUDE_DIRS})
 include_directories(include)
 
-set(OpenCV_DIR "/usr/local/lib/cmake/opencv4")
+set(OpenCV_DIR "/usr/local/lib/cmake/opencv4/")
 find_package(OpenCV REQUIRED PATHS /usr/local/lib/cmake/opencv4 NO_DEFAULT_PATH)
 include_directories(${OpenCV_INCLUDE_DIRS})
 
