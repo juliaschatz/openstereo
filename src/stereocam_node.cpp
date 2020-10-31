@@ -88,10 +88,6 @@ std::mutex frameLeftMtx;
 std::mutex frameRightMtx;
 std::mutex disparityMtx;
 std::mutex pcMtx;
-std::thread* pubLeft;
-std::thread* pubRight;
-std::thread* pubPC;
-std::thread* pubDisp;
 
 // Function defs
 void parseCSVMat(std::string mat, cv::Mat *out);
@@ -104,6 +100,7 @@ void delegatePublishPC(sensor_msgs::PointCloud2* pcmsg, std_msgs::Header* header
 
 int main(int argc, char **argv)
 {
+    cv::ocl::setUseOpenCL(true);
     // Init ROS
     ros::init(argc, argv, "stereocam_node");
     nh = new ros::NodeHandle();
@@ -199,16 +196,10 @@ void update_callback(const ros::TimerEvent &)
     bool gotRight = cameraRight->retrieve(frameRight);
     frameLeftMtx.unlock();
     frameRightMtx.unlock();
-    if (pubLeft != nullptr) {
-        pubLeft->join();
-        delete(pubLeft);
-    }
-    if (pubRight != nullptr) {
-        pubRight->join();
-        delete(pubRight);
-    }
-    pubLeft = new std::thread(delegatePublishImg, &frameLeft, "bgr8", &header, &leftCamPub, &frameLeftMtx);
-    pubRight = new std::thread(delegatePublishImg, &frameRight, "bgr8", &header, &rightCamPub, &frameRightMtx);
+    std::thread pubLeft(delegatePublishImg, &frameLeft, "bgr8", &header, &leftCamPub, &frameLeftMtx);
+    pubLeft.detach();
+    std::thread pubRight(delegatePublishImg, &frameRight, "bgr8", &header, &rightCamPub, &frameRightMtx);
+    pubRight.detach();
 
     if (!gotLeft || !gotRight)
     {
@@ -233,11 +224,8 @@ void update_callback(const ros::TimerEvent &)
 
     disparity.convertTo(disparity, CV_32F, 16.0);
     disparityMtx.unlock();
-    if (pubDisp != nullptr) {
-        pubDisp->join();
-        delete(pubDisp);
-    }
-    pubDisp = new std::thread(delegatePublishDisparity, &disparity, "mono8", &header, &disparityPub, &disparityMtx);
+    std::thread pubDisp(delegatePublishDisparity, &disparity, "mono8", &header, &disparityPub, &disparityMtx);
+    pubDisp.detach();
 
     // Build the pointcloud message
     pcMtx.lock();
@@ -252,11 +240,8 @@ void update_callback(const ros::TimerEvent &)
     customReproject(disparity, Q, colors, pcmsg.data);
     pcMtx.unlock();
     // Publish pointcloud on new thread
-    if (pubPC != nullptr) {
-        pubPC->join();
-        delete(pubPC);
-    }
-    pubPC = new std::thread(delegatePublishPC, &pcmsg, &header, &pc_pub, &pcMtx);
+    std::thread pubPC(delegatePublishPC, &pcmsg, &header, &pc_pub, &pcMtx);
+    pubPC.detach();
     auto reprojtime = std::chrono::high_resolution_clock::now();
 
     auto grabdur = std::chrono::duration_cast<std::chrono::milliseconds>(grabtime - start);
