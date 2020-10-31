@@ -17,8 +17,9 @@
 #include <string>
 #include <cmath>
 #include <chrono>
-#include <thread> 
-#include <mutex> 
+
+// Local Libs
+#include "PreAllocator.h"
 
 // ROS Node and Publishers
 ros::NodeHandle *nh;
@@ -82,28 +83,18 @@ cv::Mat rmgsLeft;
 cv::Mat rmgsRight;
 cv::Mat disparity;
 cv::Mat ndisp;
+cv::Mat points;
 cv::Mat colors;
-
-std::mutex frameLeftMtx;
-std::mutex frameRightMtx;
-std::mutex disparityMtx;
-std::mutex pcMtx;
-std::thread* pubLeft;
-std::thread* pubRight;
-std::thread* pubPC;
-std::thread* pubDisp;
 
 // Function defs
 void parseCSVMat(std::string mat, cv::Mat *out);
 void customReproject(const cv::Mat &disparity, const cv::Mat &Q, cv::Mat &colors, std::vector<uint8_t> &out);
 inline bool isValidPoint(const cv::Vec3f &pt);
 void toImageMsg(cv::Mat& image, std_msgs::Header header, const std::string& encoding, sensor_msgs::Image& ros_image);
-void delegatePublishImg(cv::Mat* img, std::string encoding, std_msgs::Header* header, ros::Publisher* pub, std::mutex* mtx);
-void delegatePublishDisparity(cv::Mat* img, std::string encoding, std_msgs::Header* header, ros::Publisher* pub, std::mutex* mtx);
-void delegatePublishPC(sensor_msgs::PointCloud2* pcmsg, std_msgs::Header* header, ros::Publisher* pub, std::mutex* mtx);
 
 int main(int argc, char **argv)
 {
+    std::cout << cv::ocl::haveOpenCL() << std::endl;
     // Init ROS
     ros::init(argc, argv, "stereocam_node");
     nh = new ros::NodeHandle();
@@ -124,7 +115,7 @@ int main(int argc, char **argv)
     pnh->param<std::string>("camLeftPath", camLeftPath, "/dev/video0");
     pnh->param<std::string>("camRightPath", camRightPath, "/dev/video1");
 
-    // Read calibration matrices
+    // Init OCV
     parseCSVMat(leftCamMatrixS, &leftCamMat);
     parseCSVMat(rightCamMatrixS, &rightCamMat);
     parseCSVMat(leftCamDistS, &leftCamDist);
@@ -132,13 +123,13 @@ int main(int argc, char **argv)
     parseCSVMat(RmatS, &Rmat);
     parseCSVMat(TvecS, &Tvec);
 
-    // Initialize undistortion and reprojection matrices
+    //cv::namedWindow("fuck");
+
     cv::stereoRectify(leftCamMat, leftCamDist, rightCamMat, rightCamDist, imSize, Rmat, Tvec, Rleft, Rright, Pleft, Pright, Q);
     cv::initUndistortRectifyMap(leftCamMat, leftCamDist, Rleft, Pleft, imSize, CV_8UC1, mapL1, mapL2);
     cv::initUndistortRectifyMap(rightCamMat, rightCamDist, Rright, Pright, imSize, CV_8UC1, mapR1, mapR2);
     Q.convertTo(Q, CV_32F);
 
-    // Set up video capture and stereo objects
     cameraLeft = new cv::VideoCapture(camLeftPath);
     cameraRight = new cv::VideoCapture(camRightPath);
     cameraLeft->set(cv::CAP_PROP_FPS, 30.0);
@@ -149,7 +140,6 @@ int main(int argc, char **argv)
     stereo->setPreFilterType(1);
     stereo->setPreFilterCap(9);
 
-    // Initialize pointcloud message, this stays the same every loop
     pcmsg.is_bigendian = false;
     pcmsg.is_dense = false;
     pcmsg.point_step = 16;
@@ -193,81 +183,75 @@ void update_callback(const ros::TimerEvent &)
     cameraRight->grab();
 
     auto start = std::chrono::high_resolution_clock::now();
-    frameLeftMtx.lock();
-    frameRightMtx.lock();
     bool gotLeft = cameraLeft->retrieve(frameLeft);
     bool gotRight = cameraRight->retrieve(frameRight);
-    frameLeftMtx.unlock();
-    frameRightMtx.unlock();
-    if (pubLeft != nullptr) {
-        pubLeft->join();
-        delete(pubLeft);
-    }
-    if (pubRight != nullptr) {
-        pubRight->join();
-        delete(pubRight);
-    }
-    pubLeft = new std::thread(delegatePublishImg, &frameLeft, "bgr8", &header, &leftCamPub, &frameLeftMtx);
-    pubRight = new std::thread(delegatePublishImg, &frameRight, "bgr8", &header, &rightCamPub, &frameRightMtx);
 
     if (!gotLeft || !gotRight)
     {
         std::cerr << "Failed to acquire frame" << std::endl;
         exit(-1);
     }
-    auto grabtime = std::chrono::high_resolution_clock::now();
 
-    // convert to grayscale and remap
-    // It's in this order so we only need to do two remaps, and also remap fewer channels
-    cv::remap(frameLeft, colors, mapL1, mapL2, cv::INTER_LINEAR);
-    cv::cvtColor(colors, gsLeft, cv::COLOR_BGR2GRAY);
+    // convert to grayscale
+    cv::cvtColor(frameLeft, gsLeft, cv::COLOR_BGR2GRAY);
     cv::cvtColor(frameRight, gsRight, cv::COLOR_BGR2GRAY);
+    auto colortime = std::chrono::high_resolution_clock::now();
+
+    // remap images
+    cv::remap(gsLeft, rmgsLeft, mapL1, mapL2, cv::INTER_LINEAR);
     cv::remap(gsRight, rmgsRight, mapR1, mapR2, cv::INTER_LINEAR);
-    
+    // Convert color representation for pointcloud
+    cv::remap(frameLeft, colors, mapL1, mapL2, cv::INTER_LINEAR);
     auto remaptime = std::chrono::high_resolution_clock::now();
 
-    // calculate disparity map
-    disparityMtx.lock();
-    stereo->compute(gsLeft, rmgsRight, disparity);
+    // zhu li do the thing
+    stereo->compute(rmgsLeft, rmgsRight, disparity);
     auto stereotime = std::chrono::high_resolution_clock::now();
 
+    // compute reprojection
     disparity.convertTo(disparity, CV_32F, 16.0);
-    disparityMtx.unlock();
-    if (pubDisp != nullptr) {
-        pubDisp->join();
-        delete(pubDisp);
-    }
-    pubDisp = new std::thread(delegatePublishDisparity, &disparity, "mono8", &header, &disparityPub, &disparityMtx);
 
     // Build the pointcloud message
-    pcMtx.lock();
+    pcmsg.header = header;
     pcmsg.height = disparity.rows;
     pcmsg.width = disparity.cols;
     pcmsg.row_step = pcmsg.width * pcmsg.point_step;
     int pointslen = sizeof(float) * 4 * pcmsg.width * pcmsg.height;
+    std::vector<uint8_t> pointvec;
     pcmsg.data.resize(pointslen, 0);
 
-    // Custom reproject function puts data directly into the pointcloud vector
+    // Our custom reproject message puts data directly into the pointcloud vector
     // saving about 200ms of copying again
     customReproject(disparity, Q, colors, pcmsg.data);
-    pcMtx.unlock();
-    // Publish pointcloud on new thread
-    if (pubPC != nullptr) {
-        pubPC->join();
-        delete(pubPC);
-    }
-    pubPC = new std::thread(delegatePublishPC, &pcmsg, &header, &pc_pub, &pcMtx);
     auto reprojtime = std::chrono::high_resolution_clock::now();
 
-    auto grabdur = std::chrono::duration_cast<std::chrono::milliseconds>(grabtime - start);
+    // publish disparity
+    cv::normalize(disparity, ndisp, 255, 0, cv::NORM_MINMAX, CV_8U);
+    sensor_msgs::Image msgLeft;
+    sensor_msgs::Image msgRight;
+    sensor_msgs::Image msgDisparity;
+    toImageMsg(frameLeft, header, "bgr8", msgLeft);
+    toImageMsg(frameRight, header, "bgr8", msgRight);
+    toImageMsg(ndisp, header, "mono8", msgDisparity);
+
+    leftCamPub.publish(msgLeft);
+    rightCamPub.publish(msgRight);
+    disparityPub.publish(msgDisparity);
+    pc_pub.publish(pcmsg);
+
+    auto publishtime = std::chrono::high_resolution_clock::now();
+
+    auto colordur = std::chrono::duration_cast<std::chrono::milliseconds>(colortime - start);
     auto remapdur = std::chrono::duration_cast<std::chrono::milliseconds>(remaptime - start);
     auto stereodur = std::chrono::duration_cast<std::chrono::milliseconds>(stereotime - start);
     auto reprojdur = std::chrono::duration_cast<std::chrono::milliseconds>(reprojtime - start);
+    auto publishdur = std::chrono::duration_cast<std::chrono::milliseconds>(publishtime - start);
     std::cout << "Cumulative times:" << std::endl;
-    std::cout << "Grab frames: " << grabdur.count() << "ms" << std::endl;
-    std::cout << "Remap and color: " << remapdur.count() << "ms" << std::endl;
+    std::cout << "Color: " << colordur.count() << "ms" << std::endl;
+    std::cout << "Remap: " << remapdur.count() << "ms" << std::endl;
     std::cout << "Stereo: " << stereodur.count() << "ms" << std::endl;
-    std::cout << "ReprojectImageTo3D: " << reprojdur.count() << "ms" << std::endl << std::endl;
+    std::cout << "ReprojectImageTo3D: " << reprojdur.count() << "ms" << std::endl;
+    std::cout << "Publish: " << publishdur.count() << "ms" << std::endl << std::endl;
 }
 
 void parseCSVMat(std::string mat, cv::Mat *out)
@@ -357,28 +341,4 @@ void toImageMsg(cv::Mat& image, std_msgs::Header header, const std::string& enco
       cv_data_ptr += image.step;
     }
   }
-}
-
-void delegatePublishImg(cv::Mat* img, std::string encoding, std_msgs::Header* header, ros::Publisher* pub, std::mutex* mtx) {
-    mtx->lock(); // blocking lock, in theory shouldn't interact with anything else because of timing
-    sensor_msgs::Image msg;
-    toImageMsg(*img, *header, encoding, msg);
-    pub->publish(msg);
-    mtx->unlock();
-}
-
-void delegatePublishDisparity(cv::Mat* img, std::string encoding, std_msgs::Header* header, ros::Publisher* pub, std::mutex* mtx) {
-    mtx->lock(); // blocking lock, in theory shouldn't interact with anything else because of timing
-    cv::normalize(*img, ndisp, 255, 0, cv::NORM_MINMAX, CV_8U);
-    sensor_msgs::Image msg;
-    toImageMsg(ndisp, *header, encoding, msg);
-    pub->publish(msg);
-    mtx->unlock();
-}
-
-void delegatePublishPC(sensor_msgs::PointCloud2* pcmsg, std_msgs::Header* header, ros::Publisher* pub, std::mutex* mtx) {
-    mtx->lock();
-    pcmsg->header = *header;
-    pub->publish(*pcmsg);
-    mtx->unlock();
 }
